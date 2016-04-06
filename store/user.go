@@ -6,16 +6,16 @@ import (
 	"errors"
 	"strings"
 	"database/sql"
-	"github.com/go-sql-driver/mysql"
 )
 
 var (
-	ErrEmailRequired = errors.New("email field may not be blank")
-	ErrFullNameRequired = errors.New("full name field may not be blank")
-	ErrNameToUseRequired = errors.New("name to use filed may not be blank")
+	ErrEmailRequired = errors.New("email may not be blank")
+	ErrFullNameRequired = errors.New("full name may not be blank")
+	ErrNameToUseRequired = errors.New("name to use may not be blank")
 	ErrPasswordTooShort = errors.New("password must be at least 8 characters")
 	ErrInvalidEmailVerifyCode = errors.New("invalid email verification code")
 	ErrDuplicateEmail = errors.New("email already registered")
+	ErrNoRows = sql.ErrNoRows
 )
 
 // Type User is the basic user type.
@@ -25,45 +25,55 @@ type User struct {
 	FullName string   `json:"fullName"`
 	NameToUse string  `json:"nameToUse"`
 	IsActive bool     `json:"isActive"`
-	IsAdmin bool      `json:"isAdmin"`
-	IsSuperUser bool  `json:"isSuperUser"`
+	Roles uint32      `json:"roles"`
 	CreatedAt int64   `json:"createdAt"`
 	UpdatedAt int64   `json:"updatedAt"`
+	ActiveAt int64    `json:"activeAt"`
 
-  allowedauth uint8
+  authby uint32
 	pwhash string
 }
 
 // UserCreate makes a new user record.  AuthUser must either have admin
 // privileges or have the special NewUser privilege.
 func UserCreate(creator AuthUser, u *User) error {
-	if !(creator.IsAdmin() || creator.IsSuperUser() || creator.IsNewUser()) {
+	if !(creator.HasRole(AdminRole | SuperRole) || creator.IsNewUser()) {
 		return ErrUnauthorized
 	}
 
-	if !creator.IsAdmin() { u.IsAdmin = false }
-	if !creator.IsSuperUser() { u.IsSuperUser = false }
+  // The new user may not have any roles that the creator doesn't have.
+  u.Roles &= creator.GetRoles()
 
 	if creator.IsNewUser() {
 		u.Email = creator.GetEmail()
-		u.allowedauth = creator.GetProvider()
+		u.authby = creator.GetProvider()
 	}
 
 	if err := u.Validate(); err != nil {
 		return err
 	}
 
+	// There's an extra step here of checking that the email already isn't in use.
+	// We could just rely on the unique check in the db, but on mysql this increments
+	// the pk for every attempt.
+	_, err := UserReadEmail(u.Email)
+	if err == nil {
+		return ErrDuplicateEmail
+	} else if err != ErrNoRows {
+		return err
+	}
+
 	u.CreatedAt = time.Now().Unix()
 	u.UpdatedAt = u.CreatedAt
+	u.ActiveAt = u.CreatedAt
 
-	query :=	"INSERT INTO " + UserTable + " (email, allowedauth, pwhash, fullname, nametouse, isactive, isadmin, issuperuser, createdat, updatedat) VALUES (?,?,?,?,?,?,?,?,?,?)"
-	r, err := db.Exec(query, u.Email, u.allowedauth, u.pwhash, u.FullName, u.NameToUse, u.IsActive, u.IsAdmin, u.IsSuperUser, u.CreatedAt, u.UpdatedAt)
+	query :=	"INSERT INTO " + UserTable + " (email, authby, pwhash, fullname, nametouse, isactive, roles, created_at, updated_at, active_at) VALUES (?,?,?,?,?,?,?,?,?,?)"
+	r, err := db.Exec(query, u.Email, u.authby, u.pwhash, u.FullName, u.NameToUse, u.IsActive, u.Roles, u.CreatedAt, u.UpdatedAt, u.ActiveAt)
 	if err != nil {
-		if err0, ok := err.(*mysql.MySQLError); ok {
-			// 1062 is mysql for unique contstraint violation
-			if err0.Number == 1062 {
-				return ErrDuplicateEmail
-			}
+		// This will normally be caught above, but in the case of two concurrent attempts
+		// to use the same email, one will get caught here.
+		if IsDuplicate(err) {
+			return ErrDuplicateEmail
 		}
 		return err
 	}
@@ -73,41 +83,55 @@ func UserCreate(creator AuthUser, u *User) error {
   return nil
 }
 
-const userSelect = "SELECT id, email, fullname, nametouse, isactive, isadmin, issuperuser, createdat, updatedat FROM " + UserTable
+const userSelect = "SELECT id, email, fullname, nametouse, isactive, roles, created_at, updated_at, active_at FROM " + UserTable
 
-func readRows(rows *sql.Rows, err error) StoreChannel {
+// returns err = ErrNoRows if the row doesn't exist
+func userReadRow(row *sql.Row) (*User, error) {
+	var u User
+  err := row.Scan(&u.Id, &u.Email, &u.FullName, &u.NameToUse, &u.IsActive,
+		&u.Roles, &u.CreatedAt, &u.UpdatedAt, &u.ActiveAt)
+	return &u, err
+}
+
+func userReadRows(rows *sql.Rows, err error) StoreChannel {
 	ch := make(StoreChannel)
 	go func() {
 		defer close(ch)
 		if err != nil {
-			ch <- StoreResult{User{}, err}
+			ch <- StoreResult{&User{}, err}
 			return
 		}
 		defer rows.Close()
 		for rows.Next() {
 		  var u User
 			err := rows.Scan(&u.Id, &u.Email, &u.FullName, &u.NameToUse, &u.IsActive,
-				&u.IsAdmin, &u.IsSuperUser, &u.CreatedAt, &u.UpdatedAt)
-			ch <- StoreResult{u, err}
+				&u.Roles, &u.CreatedAt, &u.UpdatedAt, &u.ActiveAt)
+			ch <- StoreResult{&u, err}
 		}
 		if err := rows.Err(); err != nil {
-			ch <- StoreResult{User{}, err}
+			ch <- StoreResult{&User{}, err}
 		}
 	}()
 	return ch
 }
 
 // UserRead gets one user record by primary key.
-func UserRead(id uint32) StoreChannel {
+func UserRead(id uint32) (*User, error) {
 	query := userSelect + " WHERE id=? LIMIT 1"
-	return readRows(db.Query(query, id))
+	return userReadRow(db.QueryRow(query, id))
+}
+
+// UserReadEmail gets one user record by email address
+func UserReadEmail(email string) (*User, error) {
+	query := userSelect + " WHERE email=? LIMIT 1"
+	return userReadRow(db.QueryRow(query, email))
 }
 
 // UserReadn gets one range of user records by primary key.
 // Returns up to n records starting from id=start.
 func UserReadn(start, n uint32) StoreChannel {
 	query := fmt.Sprintf(userSelect + " WHERE id>=? ORDER BY id LIMIT %d", n)
-	return readRows(db.Query(query, start))
+	return userReadRows(db.Query(query, start))
 }
 
 // UserReadMultiple gets an arbitrary set of records by primary key.
@@ -115,13 +139,13 @@ func UserReadMultiple(ids []uint32) StoreChannel {
 	if len(ids) == 0 {
 		return emptyStoreChannel()
 	}
-	strids := make([]string, len(ids))
+	strids := make([]string, 0, len(ids))
 	for _, id := range ids {
 		strids = append(strids, fmt.Sprintf("%d", id))
 	}
 	idlist := strings.Join(strids, ",")
 	query := userSelect + " WHERE id IN (" + idlist + ") ORDER BY id"
-	return readRows(db.Query(query))
+	return userReadRows(db.Query(query))
 }
 
 // UserSearch finds all records in which any of the fields match the search text.
@@ -133,7 +157,7 @@ func UserSearch(searchtext string, fields []string) StoreChannel {
 	if len(fields) == 0 || len(searchtext) == 0 {
 		return emptyStoreChannel() // TODO make this an error
 	}
-	effs := make([]string, len(fields))
+	effs := make([]string, 0, len(fields))
 	texts := make([]interface{}, len(fields))
 	for _, field := range fields {
 		effs = append(effs, field + " LIKE ?")
@@ -141,7 +165,7 @@ func UserSearch(searchtext string, fields []string) StoreChannel {
 	}
 	// TODO fix ordering
 	query := userSelect + " WHERE " + strings.Join(effs, " OR ") + " ORDER BY " + fields[0]
-	return readRows(db.Query(query, texts...))
+	return userReadRows(db.Query(query, texts...))
 }
 
 // UserSearchn is the same as Search, except that a subset of results is returned:

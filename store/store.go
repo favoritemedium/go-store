@@ -15,6 +15,9 @@ package store
 
 import (
 	"database/sql"
+	"github.com/go-sql-driver/mysql"
+	"os"
+	"fmt"
 	"errors"
 )
 
@@ -23,10 +26,17 @@ import (
 // that must be done elsewhere.
 const (
 	UserTable = "users"
-	SignedinUserTable = "users_signedin"
-	SigninHistoryTable = "users_history"
-	EmailVerifyTable = "users_verify_email"
+	UserSigninsTable = "users_signins"
+	UserTokensTable = "users_tokens"
+	UserVerifyTable = "users_verify"
 
+)
+
+// These are the possible user roles.
+// Users may have any combination of roles.
+const (
+	SuperRole = 1 << iota
+	AdminRole
 )
 
 // These are the authentication providers we know about.
@@ -44,22 +54,15 @@ var (
 // remove this
 var ErrNotImplemented = errors.New("not implemented")
 
-// Type StoreResult contains returned data from database queries
+// Type StoreResult contains one row of returned data from db queries
 type StoreResult struct {
 	Data interface{}
 	Err  error
 }
 
-// Type StoreError is used for any db-level erros
-type StoreError struct {
-	message string
-}
-
-func (e *StoreError) Error() string {
-	return e.message
-}
-
+// Type StoreChannel is used to return a set of data from db queries
 type StoreChannel chan StoreResult
+
 
 var db *sql.DB
 
@@ -69,6 +72,25 @@ func Init(dbhandle *sql.DB) {
 	db = dbhandle
 }
 
+// Catch aborts on an error
+func Catch(err error) {
+	if err == nil { return; }
+	fmt.Println(err)
+	os.Exit(1)
+}
+
+// IsDuplicate tests err to see if it's a unique constraint db error
+func IsDuplicate(err error) bool {
+	//if err != nil {
+		if err0, ok := err.(*mysql.MySQLError); ok {
+			// 1062 is mysql for unique contstraint violation
+			return err0.Number == 1062
+		}
+	//}
+	return false
+}
+
+// a placeholder to simulate no results
 func emptyStoreChannel() StoreChannel {
 	ch := make(StoreChannel)
   go close(ch)

@@ -43,14 +43,13 @@ type AuthUser struct {
 	NameToUse string
 
 	id uint32
-	provider uint8
+	provider uint32
+	roles uint32
 	email string
 	authToken string
 	authTokenExpiry int64
 	refreshToken string
 	refreshTokenExpiry int64
-	isAdmin bool
-	isSuperUser bool
 	isNewUser bool
 }
 
@@ -125,7 +124,7 @@ func (u *AuthUser) GetId() uint32 {
 }
 
 // GetProvider returns the authentication provider for this user.
-func (u *AuthUser) GetProvider() uint8 {
+func (u *AuthUser) GetProvider() uint32 {
 	return u.provider
 }
 
@@ -134,14 +133,23 @@ func (u *AuthUser) GetEmail() string {
 	return u.email
 }
 
-// IsAdmin tells us if this user has admin privileges.
-func (u *AuthUser) IsAdmin() bool {
-	return u.isAdmin
+// GetRoles returns all the roles that this user has
+func (u *AuthUser) GetRoles() uint32 {
+	return u.roles
 }
 
-// IsSuperUser tells us if this user has superuser privileges.
-func (u *AuthUser) IsSuperUser() bool {
-	return u.isSuperUser || u.id == 1
+// IsAdmin tells us if this user has any of the roles given, i.e.
+//     u.HasRole(SuperRole | AdminRole)
+//     u.HasRole(SuperRole) || u.HasRole(AdminRole)  // equivalent
+func (u *AuthUser) HasRole(roles uint32) bool {
+	return u.roles & roles != 0
+}
+
+// HasRoles returns true if the user has all of the roles given.
+//     u.HasRole(SuperRole | AdminRole)
+//     u.HasRole(SuperRole) && u.HasRole(AdminRole)  // equivalent
+func (u *AuthUser) HasRoles(roles uint32) bool {
+	return u.roles & roles == roles
 }
 
 // IsNewUser tells us if there is not yet a matching User record, and we
